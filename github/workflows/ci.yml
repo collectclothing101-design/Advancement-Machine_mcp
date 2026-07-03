@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.10"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install .[dev]
+      - run: black --check .
+      - run: ruff check .
+      - run: mypy src/ --ignore-missing-imports
+
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.10", "3.11"]
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install .[dev]
+      - name: Run tests with coverage
+        run: pytest --cov=advancement_machine --cov-report=xml --cov-report=term-missing
+      - uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+          fail_ci_if_error: false
+
+  build:
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install build
+      - name: Build wheel
+        run: python -m build
+      - uses: actions/upload-artifact@v3
+        with:
+          name: dist
+          path: dist/
+
+  sbom:
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install .[dev]
+      - name: Generate SBOM
+        run: |
+          python -c "
+from advancement_machine.build_system import BuildSystem
+import json
+b = BuildSystem()
+sbom = b.generate_sbom()
+with open('sbom.json', 'w') as f:
+    json.dump(sbom, f, indent=2)
+print('SBOM generated')
+          "
+      - uses: actions/upload-artifact@v3
+        with:
+          name: sbom
+          path: sbom.json
+
+  release-gate:
+    runs-on: ubuntu-latest
+    needs: [build, sbom]
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install .[dev]
+      - name: Clean build
+        run: python -m build
+      - name: Verify checksums
+        run: |
+          python -c "
+import hashlib
+from pathlib import Path
+for f in Path('dist').glob('*'):
+    if f.suffix != '.whl':
+        continue
+    s = hashlib.sha256(f.read_bytes()).hexdigest()
+    print(f'{f.name}: {s}')
+          "
+      - name: Smoke test install
+        run: |
+          pip install dist/*.whl
+          advancement --version
+          advancement doctor

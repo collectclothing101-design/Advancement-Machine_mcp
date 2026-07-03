@@ -1,0 +1,219 @@
+{
+  "title": "Advancement Machine — mTLS & Audit",
+  "uid": "advancement-mtls-audit",
+  "schemaVersion": 39,
+  "version": 1,
+  "timezone": "utc",
+  "panels": [
+    {
+      "id": 1,
+      "title": "mTLS Handshake Success Rate (5m rate)",
+      "type": "stat",
+      "gridPos": {"x": 0, "y": 0, "w": 6, "h": 6},
+      "targets": [
+        {
+          "expr": "rate(advancement_mtls_handshake_total{result=\"success\"}[5m]) or rate(advancement_mtls_handshake_total{result=\"success\"}[5m])",
+          "legendFormat": "success / sec"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "orange", "value": 0.5},
+              {"color": "green", "value": 2}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "mTLS Handshake Failures (5m rate)",
+      "type": "stat",
+      "gridPos": {"x": 6, "y": 0, "w": 6, "h": 6},
+      "targets": [
+        {
+          "expr": "rate(advancement_mtls_handshake_total{result=\"failure\"}[5m]) or rate(advancement_mtls_handshake_total{result=\"failure\"}[5m])",
+          "legendFormat": "failures / sec"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 1},
+              {"color": "red", "value": 5}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "mTLS Handshake Ratio (success / total)",
+      "type": "gauge",
+      "gridPos": {"x": 12, "y": 0, "w": 6, "h": 6},
+      "targets": [
+        {
+          "expr": "sum(rate(advancement_mtls_handshake_total{result=\"success\"}[5m])) / (sum(rate(advancement_mtls_handshake_total{result=\"success\"}[5m])) + sum(rate(advancement_mtls_handshake_total{result=\"failure\"}[5m]))) or vector(1)",
+          "legendFormat": "ratio"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "orange", "value": 0.9},
+              {"color": "green", "value": 0.99}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "mTLS Rejection Reasons (rate 1h)",
+      "type": "piechart",
+      "gridPos": {"x": 18, "y": 0, "w": 6, "h": 6},
+      "targets": [
+        {
+          "expr": "sum(rate(advancement_mtls_rejection_total[1h])) by (reason)",
+          "legendFormat": "{{reason}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Audit Log Row Count",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 7, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "advancement_audit_log_rows",
+          "legendFormat": "total rows"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {"mode": "palette-classic"}
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Audit Log Growth Rate (5m)",
+      "type": "timeseries",
+"type": "timeseries",
+      "gridPos": {"x": 12, "y": 7, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(advancement_audit_log_rows[5m])",
+          "legendFormat": "rows / sec"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "color": {"mode": "palette-classic"}
+        }
+      }
+    },
+    {
+      "id": 7,
+      "title": "Audit Log Veto Rate (5m)",
+      "type": "stat",
+      "gridPos": {"x": 0, "y": 16, "w": 4, "h": 4},
+      "targets": [
+        {
+          "expr": "rate(advancement_forget_vetoed_total[5m])",
+          "legendFormat": "vetoes / sec"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 1},
+              {"color": "red", "value": 5}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 8,
+      "title": "Compaction Duration (last cycle)",
+      "type": "stat",
+      "gridPos": {"x": 4, "y": 16, "w": 4, "h": 4},
+      "targets": [
+        {
+          "expr": "advancement_compaction_duration_seconds",
+          "legendFormat": "seconds"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 15},
+              {"color": "red", "value": 30}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 9,
+      "title": "Compaction Vectors Removed (last cycle)",
+      "type": "stat",
+      "gridPos": {"x": 8, "y": 16, "w": 4, "h": 4},
+      "targets": [
+        {
+          "expr": "advancement_compaction_vectors_removed",
+          "legendFormat": "vectors"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 500},
+              {"color": "red", "value": 1000}
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "tags": ["advancement", "mtls", "audit", "compaction"]
+}
