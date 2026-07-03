@@ -1,24 +1,51 @@
-__pycache__
-*.pyc
-*.pyo
-*.egg-info
-dist
-build
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
 *.egg
+*.whl
+dist/
+build/
+sdist/
+
+# Coverage
 .coverage
-htmlcov
+.coverage.*
+htmlcov/
 coverage.xml
-.vscode
-.idea
+
+# Testing
+.pytest_cache/
+.tox/
+.nox/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 .DS_Store
 Thumbs.db
-logs
-target
+
+# Logs
+logs/
+
+# Project-specific ignores (stale/misplaced files)
 .flattened-pom.xml
 pom.xml
-package.json
+target/
 proguard.conf
-setup.py
-.pytest_cache
-.venv
-venv
+package.json
+
+# Secrets / environment
+.env
+.env.*
+*.pem
+*.key

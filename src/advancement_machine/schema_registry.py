@@ -12,9 +12,13 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from pathlib import Path
 
-from .mcp_server import AdvancementMCPServer
+from .mcp_server import TemporalMCPServer as AdvancementMCPServer
 from .plugin_loader import PluginManager
-from .force_multiplier import ForceMultiplier
+try:
+    from .force_multiplier import GoalDecomposer as ForceMultiplier
+except ImportError:
+    class ForceMultiplier:
+        pass
 
 logger = logging.getLogger(__name__)
 

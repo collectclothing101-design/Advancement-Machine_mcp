@@ -23,7 +23,7 @@ if not (project_root / "pyproject.toml").exists():
     # Standalone setup when pyproject.toml is not available
     setup(
         name="advancement-machine",
-        version="0.3.0",
+        version="0.4.0",
         description="Universal MCP/Plugin/Skill engine — deterministic build, SBOM, supply-chain verified",
         author="EuroThrottle",
         license="MIT",
@@ -58,7 +58,7 @@ if not (project_root / "pyproject.toml").exists():
         },
         entry_points={
             "console_scripts": [
-                "advancement = advancement_machine.cli:cli",
+                "advancement = advancement_machine.cli:main",
             ],
         },
         include_package_data=True,

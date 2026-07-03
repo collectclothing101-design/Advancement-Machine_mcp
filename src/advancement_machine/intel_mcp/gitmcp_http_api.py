@@ -8,7 +8,7 @@ Requires: FastAPI, Pydantic (added to imports, assumed available)
 """
 
 from fastapi import FastAPI, Request, HTTPException, Header
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Dict, Any, Optional, List
 import uuid
 from datetime import datetime, timezone
@@ -35,16 +35,17 @@ app = FastAPI(
 
 class TaskRequest(BaseModel):
     """Single task execution request."""
-    task_name: str = Field(..., description="Name of task to execute (e.g., 'gist:fetch_raw')")
-    params: Dict[str, Any] = Field(default_factory=dict, description="Task parameters")
-    
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "task_name": "gist:fetch_raw",
                 "params": {"gist_id": "abc123"}
             }
         }
+    )
+
+    task_name: str = Field(..., description="Name of task to execute (e.g., 'gist:fetch_raw')")
+    params: Dict[str, Any] = Field(default_factory=dict, description="Task parameters")
 
 
 class TaskResponse(BaseModel):
@@ -59,7 +60,7 @@ class TaskResponse(BaseModel):
 
 class BatchTasksRequest(BaseModel):
     """Batch task execution request."""
-    tasks: List[TaskRequest] = Field(..., min_items=1, max_items=100, description="Tasks to execute")
+    tasks: List[TaskRequest] = Field(..., min_length=1, max_length=100, description="Tasks to execute")
 
 
 class BatchTasksResponse(BaseModel):

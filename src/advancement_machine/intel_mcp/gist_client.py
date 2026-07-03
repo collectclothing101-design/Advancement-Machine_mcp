@@ -194,7 +194,7 @@ class GistClient:
             token: GitHub Personal Access Token (optional)
             api_base: GitHub API base URL
         """
-        self.token = token or os.getenv("GITHUB_TOKEN")
+        self.token = token or os.getenv("GITHUB_TOKEN") or None
         self.api_base = api_base
         self.rate_limit_remaining = 60
         self.rate_limit_reset = 0

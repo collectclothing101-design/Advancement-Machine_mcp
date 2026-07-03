@@ -17,7 +17,7 @@ import math
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from .mcp_server import AdvancementMCPServer
+from .mcp_server import TemporalMCPServer as AdvancementMCPServer
 
 logger = logging.getLogger(__name__)
 

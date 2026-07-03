@@ -13,13 +13,16 @@ Universal MCP/Plugin/Skill Engine with Temporal Intelligence and Resilient Task 
 ## Quick Start
 
 ```bash
-cd "C:\Users\JohnDoe\Desktop\Advancement-Machine_mcp"
+# Install from PyPI
+pip install advancement-machine
 
-# Run all tests (PYTHONPATH handled by pyproject.toml)
+# Or install from source
+git clone https://github.com/eurothrottle/advancement-machine.git
+cd advancement-machine
+pip install -e .
+
+# Run all tests
 pytest -v
-
-# Run temporal tests only
-pytest tests/test_temporal_scheduler.py -v
 
 # Quick CLI test
 python3 -m advancement_machine.cli temporal record "event" '{}'
@@ -210,21 +213,22 @@ src/advancement_machine/
 ├── plugin_loader.py             # Dynamic plugin loading
 ├── force_multiplier.py          # Resource optimization
 ├── intel_mcp/
-│   ├── task_framework.py        # Atomic task handlers (547 LOC)
-│   ├── gist_task_handlers.py    # GitHub Gist operations (506 LOC)
-│   ├── gitmcp_registry.py       # Centralized dispatch (489 LOC)
-│   ├── circuit_breaker.py       # Fail-fast pattern (234 LOC)
-│   ├── request_tracer.py        # Correlation IDs (273 LOC)
-│   ├── rate_limiter.py          # DOS prevention (371 LOC)
-│   └── gitmcp_http_api.py       # REST endpoints (390 LOC)
+│   ├── __init__.py              # Intel MCP package exports
+│   ├── task_framework.py        # Atomic task handlers
+│   ├── gist_task_handlers.py    # GitHub Gist operations
+│   ├── gitmcp_registry.py       # Centralized dispatch
+│   ├── circuit_breaker.py       # Fail-fast pattern
+│   ├── request_tracer.py        # Correlation IDs
+│   ├── rate_limiter.py          # DOS prevention
+│   └── gitmcp_http_api.py       # REST endpoints
 └── ...
 
 tests/
-├── test_temporal_scheduler.py   # 6 temporal tests
-├── test_phase1_task_decomposition.py  # 25 framework tests
-├── test_phase2_core.py                # 29 resilience tests
-├── test_phase3_registry.py            # 22 registry tests
-└── test_intel_mcp_integration.py      # 17 integration tests
+├── test_temporal_scheduler.py   # Temporal scheduling tests
+├── test_phase1_task_decomposition.py  # Task framework tests
+├── test_phase2_core.py                # Resilience pattern tests
+├── test_phase3_registry.py            # Registry dispatch tests
+└── test_intel_mcp_integration.py      # Integration tests
 ```
 
 ---
