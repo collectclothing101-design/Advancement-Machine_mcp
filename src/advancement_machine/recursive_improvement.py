@@ -48,6 +48,7 @@ class RecursiveImprovementEngine:
     and deploys successful improvements back into the running system."""
 
     def __init__(self, watch_dirs: list[str] | None = None) -> None:
+        """Initialize the engine with the directories to scan and empty metric history."""
         self.watch_dirs = watch_dirs or ["src/advancement_machine"]
         self.candidates: dict[str, ImprovementCandidate] = {}
         self.metrics: dict[str, list[float]] = {
@@ -138,10 +139,12 @@ class RecursiveImprovementEngine:
 
     @staticmethod
     def _source_hash(source: str) -> str:
+        """Return a stable SHA-256 digest of the given source text."""
         return hashlib.sha256(source.encode()).hexdigest()
 
     @staticmethod
     def _find_function(tree: ast.AST, name: str) -> Any | None:
+        """Return the sole function or method named `name` in `tree`, or None if ambiguous."""
         matches = [
             node
             for node in ast.walk(tree)
@@ -203,16 +206,22 @@ class RecursiveImprovementEngine:
         """
 
         class GuardTransformer(ast.NodeTransformer):
+            """Rewrites trailing else branches into guard clauses within a single scope."""
+
             def visit_FunctionDef(self, child: Any) -> Any:
+                """Leave nested function definitions untouched."""
                 return child
 
             def visit_AsyncFunctionDef(self, child: ast.AsyncFunctionDef) -> Any:
+                """Leave nested async function definitions untouched."""
                 return child
 
             def visit_ClassDef(self, child: ast.ClassDef) -> Any:
+                """Leave nested class definitions untouched."""
                 return child
 
             def visit_If(self, child: ast.If) -> Any:
+                """Flatten this if-statement's else branch when the body always exits."""
                 self.generic_visit(child)
                 if child.orelse and isinstance(child.body[-1], (ast.Return, ast.Raise)):
                     tail = child.orelse
@@ -230,6 +239,7 @@ class RecursiveImprovementEngine:
         """Structural complexity independent of stale AST source line numbers."""
 
         def score(child: ast.AST, depth: int = 0) -> float:
+            """Recursively sum depth-weighted control-flow nodes under `child`."""
             control = isinstance(child, (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try))
             return float(control) * (1 + depth) + sum(
                 score(n, depth + int(control)) for n in ast.iter_child_nodes(child)
@@ -274,6 +284,7 @@ class RecursiveImprovementEngine:
 
     @staticmethod
     def _replace_function(source: str, target: Any, replacement: str) -> str:
+        """Splice `replacement` in place of `target` within `source`, preserving indentation and line endings."""
         lines = source.splitlines(keepends=True)
         start = min([target.lineno] + [d.lineno for d in target.decorator_list]) - 1
         indent = lines[start][: target.col_offset]
@@ -348,6 +359,7 @@ class RecursiveImprovementEngine:
         return True
 
     def summary(self) -> dict[str, Any]:
+        """Return generation, deployment, and bottleneck counters for this engine."""
         return {
             "candidates_generated": self._generation_count,
             "candidates_deployed": self._deployment_count,
@@ -357,6 +369,7 @@ class RecursiveImprovementEngine:
         }
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
+        """Return MCP tool schemas exposing this engine's analyze/generate/summary actions."""
         return [
             {
                 "name": "recursive_improve_analyze",
@@ -384,4 +397,5 @@ class RecursiveImprovementEngine:
 
 
 def _as_statements(result: Any) -> list[Any]:
+    """Normalize a NodeTransformer visit result to a list of statements."""
     return result if isinstance(result, list) else [result]
