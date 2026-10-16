@@ -10,14 +10,18 @@ handles branching based on prior results.
 
 import asyncio
 import hashlib
-import json
 import logging
+import time
 import uuid
-from typing import Any, Dict, List, Optional, Callable, Awaitable
-from datetime import datetime, timezone
+from collections import deque
+from collections.abc import Awaitable, Callable
 from enum import Enum
+from typing import Any, Optional
+
+from .recursive_improvement import RecursiveImprovementEngine
 
 logger = logging.getLogger(__name__)
+
 
 class NodeType(Enum):
     TOOL_CALL = "tool_call"
@@ -26,6 +30,7 @@ class NodeType(Enum):
     PARALLEL = "parallel"
     MERGE = "merge"
 
+
 class NodeStatus(Enum):
     PENDING = "pending"
     RUNNING = "running"
@@ -33,12 +38,18 @@ class NodeStatus(Enum):
     FAILED = "failed"
     SKIPPED = "skipped"
 
+
 class WorkflowNode:
-    def __init__(self, node_id: str, node_type: NodeType,
-                 tool_name: str = "", arguments: dict = None,
-                 condition: Optional[Callable[[dict], bool]] = None,
-                 sub_workflow: Optional['WorkflowDefinition'] = None,
-                 dependencies: List[str] = None):
+    def __init__(
+        self,
+        node_id: str,
+        node_type: NodeType,
+        tool_name: str = "",
+        arguments: dict[str, Any] | None = None,
+        condition: Callable[[dict[str, Any]], bool] | None = None,
+        sub_workflow: Optional["WorkflowDefinition"] = None,
+        dependencies: list[str] | None = None,
+    ) -> None:
         self.node_id = node_id
         self.node_type = node_type
         self.tool_name = tool_name
@@ -48,20 +59,24 @@ class WorkflowNode:
         self.dependencies = dependencies or []
         self.status = NodeStatus.PENDING
         self.result: Any = None
-        self.error: Optional[str] = None
+        self.error: str | None = None
+
 
 class WorkflowDefinition:
-    def __init__(self, workflow_id: str, name: str, description: str = ""):
+    def __init__(self, workflow_id: str, name: str, description: str = "") -> None:
         self.workflow_id = workflow_id
         self.name = name
         self.description = description
-        self.nodes: Dict[str, WorkflowNode] = {}
-        self.entry_points: List[str] = []
+        self.nodes: dict[str, WorkflowNode] = {}
+        self.entry_points: list[str] = []
 
-    def add_node(self, node: WorkflowNode):
+    def add_node(self, node: WorkflowNode) -> None:
+        if node.node_id in self.nodes:
+            raise ValueError(f"Duplicate node ID: {node.node_id}")
         self.nodes[node.node_id] = node
         if not node.dependencies:
             self.entry_points.append(node.node_id)
+
 
 class WorkflowEngine:
     """DAG-based workflow composer and executor.
@@ -72,11 +87,13 @@ class WorkflowEngine:
     aggregated results.
     """
 
-    def __init__(self):
-        self.workflows: Dict[str, WorkflowDefinition] = {}
-        self._tool_executor: Optional[Callable[[str, dict], Awaitable[Any]]] = None
+    def __init__(self, improvement_engine: RecursiveImprovementEngine | None = None) -> None:
+        self.improvement_engine = improvement_engine
+        self._active_workflows: set[str] = set()
+        self.workflows: dict[str, WorkflowDefinition] = {}
+        self._tool_executor: Callable[[str, dict[str, Any]], Awaitable[Any]] | None = None
 
-    def set_tool_executor(self, executor: Callable[[str, dict], Awaitable[Any]]):
+    def set_tool_executor(self, executor: Callable[[str, dict[str, Any]], Awaitable[Any]]) -> None:
         """Register the function that executes MCP tool calls."""
         self._tool_executor = executor
 
@@ -87,21 +104,36 @@ class WorkflowEngine:
         self.workflows[wf_id] = wf
         return wf
 
-    def add_tool_node(self, workflow_id: str, tool_name: str, arguments: dict = None,
-                      dependencies: List[str] = None, node_id: str = "") -> str:
+    def add_tool_node(
+        self,
+        workflow_id: str,
+        tool_name: str,
+        arguments: dict[str, Any] | None = None,
+        dependencies: list[str] | None = None,
+        node_id: str = "",
+    ) -> str:
         """Add a tool-call node to a workflow."""
         wf = self.workflows.get(workflow_id)
         if not wf:
             raise ValueError(f"Workflow {workflow_id} not found")
         nid = node_id or f"tool_{tool_name}_{len(wf.nodes)}"
-        node = WorkflowNode(node_id=nid, node_type=NodeType.TOOL_CALL,
-                            tool_name=tool_name, arguments=arguments or {},
-                            dependencies=dependencies or [])
+        node = WorkflowNode(
+            node_id=nid,
+            node_type=NodeType.TOOL_CALL,
+            tool_name=tool_name,
+            arguments=arguments or {},
+            dependencies=dependencies or [],
+        )
         wf.add_node(node)
         return nid
 
-    def add_conditional_node(self, workflow_id: str, condition: Callable[[dict], bool],
-                              node_id: str = "", dependencies: List[str] = None) -> str:
+    def add_conditional_node(
+        self,
+        workflow_id: str,
+        condition: Callable[[dict[str, Any]], bool],
+        node_id: str = "",
+        dependencies: list[str] | None = None,
+    ) -> str:
         """Add a conditional branch node. The condition function receives the
         accumulated context dict and should return True/False to determine
         which branch executes next."""
@@ -109,13 +141,18 @@ class WorkflowEngine:
         if not wf:
             raise ValueError(f"Workflow {workflow_id} not found")
         nid = node_id or f"cond_{len(wf.nodes)}"
-        node = WorkflowNode(node_id=nid, node_type=NodeType.CONDITIONAL,
-                            condition=condition, dependencies=dependencies or [])
+        node = WorkflowNode(
+            node_id=nid,
+            node_type=NodeType.CONDITIONAL,
+            condition=condition,
+            dependencies=dependencies or [],
+        )
         wf.add_node(node)
         return nid
 
-    async def execute_workflow(self, workflow_id: str,
-                                initial_context: dict = None) -> dict:
+    async def execute_workflow(
+        self, workflow_id: str, initial_context: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         """Execute a workflow DAG.
 
         Resolves dependencies, runs parallel phases concurrently, evaluates
@@ -125,72 +162,115 @@ class WorkflowEngine:
         if not wf:
             return {"error": f"Workflow {workflow_id} not found"}
 
-        context = initial_context or {}
-        all_results = {}
-        executed: set = set()
-        failed: set = set()
+        if workflow_id in self._active_workflows:
+            return {"error": f"Workflow {workflow_id} is already running or recursively referenced"}
+        self._active_workflows.add(workflow_id)
+        started = time.perf_counter()
+        outcome = None
+        try:
+            outcome = await self._run_workflow(wf, dict(initial_context or {}))
+            return outcome
+        finally:
+            self._active_workflows.discard(workflow_id)
+            if self.improvement_engine is not None:
+                elapsed = time.perf_counter() - started
+                completed = sum(n.status == NodeStatus.COMPLETED for n in wf.nodes.values())
+                unsuccessful = sum(
+                    n.status in (NodeStatus.FAILED, NodeStatus.SKIPPED) for n in wf.nodes.values()
+                )
+                self.improvement_engine.record_metric("execution_time", elapsed)
+                self.improvement_engine.record_metric(
+                    "error_rate",
+                    (
+                        1.0
+                        if outcome is None or "error" in outcome
+                        else unsuccessful / max(len(wf.nodes), 1)
+                    ),
+                )
+                self.improvement_engine.record_metric("throughput", completed / max(elapsed, 1e-12))
 
-        # Build adjacency for dependency resolution
-        remaining = set(wf.nodes.keys())
+    async def _run_workflow(
+        self, wf: WorkflowDefinition, context: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Resolve each edge once, with stable ordering and explicit failure propagation."""
+        for node in wf.nodes.values():
+            node.status, node.result, node.error = NodeStatus.PENDING, None, None
+        successors: dict[str, list[str]] = {nid: [] for nid in wf.nodes}
+        pending = {}
+        for nid, node in wf.nodes.items():
+            dependencies = set(node.dependencies)
+            missing = dependencies - wf.nodes.keys()
+            if missing:
+                return {"error": f"Node {nid} has missing dependencies: {sorted(missing)}"}
+            pending[nid] = len(dependencies)
+            for dependency in sorted(dependencies):
+                successors[dependency].append(nid)
 
-        while remaining:
-            # Find nodes whose dependencies are all satisfied
-            ready = []
-            for nid in remaining:
-                node = wf.nodes[nid]
-                deps_met = all(d in executed for d in node.dependencies)
-                if deps_met:
-                    ready.append(nid)
+        # Validate acyclicity before any tool side effects.
+        counts = pending.copy()
+        queue = deque(nid for nid, count in counts.items() if count == 0)
+        visited = 0
+        while queue:
+            nid = queue.popleft()
+            visited += 1
+            for child in successors[nid]:
+                counts[child] -= 1
+                if counts[child] == 0:
+                    queue.append(child)
+        if visited != len(wf.nodes):
+            return {"error": "Workflow contains a dependency cycle"}
 
-            if not ready:
-                # Deadlock — remaining nodes have unmet dependencies
-                for nid in remaining:
-                    node = wf.nodes[nid]
-                    missing = [d for d in node.dependencies if d not in executed]
-                    logger.error(f"Workflow deadlock: node {nid} waiting for {missing}")
-                    node.status = NodeStatus.FAILED
-                    node.error = f"Deadlock: missing dependencies {missing}"
-                    failed.add(nid)
-                    remaining.discard(nid)
-                continue
-
-            # Execute ready nodes in parallel
-            phase_tasks = []
+        ready = [nid for nid, count in pending.items() if count == 0]
+        results = {}
+        while ready:
+            runnable = []
             for nid in ready:
                 node = wf.nodes[nid]
-                phase_tasks.append(self._execute_node(node, context))
-
-            phase_results = await asyncio.gather(*phase_tasks, return_exceptions=True)
-
-            for nid, result in zip(ready, phase_results):
-                node = wf.nodes[nid]
-                if isinstance(result, Exception):
-                    node.status = NodeStatus.FAILED
-                    node.error = str(result)
-                    failed.add(nid)
-                    all_results[nid] = {"status": "failed", "error": str(result)}
+                if any(wf.nodes[d].status != NodeStatus.COMPLETED for d in node.dependencies):
+                    node.status = NodeStatus.SKIPPED
+                    node.error = "Dependency did not complete successfully"
+                    results[nid] = {"status": "skipped", "error": node.error}
                 else:
-                    node.status = NodeStatus.COMPLETED
-                    node.result = result
-                    executed.add(nid)
-                    all_results[nid] = {"status": "completed", "result": result}
-                    # Update context with result
+                    runnable.append(nid)
+            phase_results = await asyncio.gather(
+                *(self._execute_node(wf.nodes[nid], context.copy()) for nid in runnable),
+                return_exceptions=True,
+            )
+            for nid, result in zip(runnable, phase_results, strict=True):
+                node = wf.nodes[nid]
+                if isinstance(result, BaseException):
+                    if not isinstance(result, Exception):
+                        raise result
+                    node.status, node.error = NodeStatus.FAILED, str(result)
+                    results[nid] = {"status": "failed", "error": str(result)}
+                else:
+                    node.status, node.result = NodeStatus.COMPLETED, result
+                    results[nid] = {"status": "completed", "result": result}
                     context[nid] = result
+            next_ready = []
+            for nid in ready:
+                for child in successors[nid]:
+                    pending[child] -= 1
+                    if pending[child] == 0:
+                        next_ready.append(child)
+            ready = next_ready
 
-                remaining.discard(nid)
-
+        completed = sum(n.status == NodeStatus.COMPLETED for n in wf.nodes.values())
+        failed = sum(n.status == NodeStatus.FAILED for n in wf.nodes.values())
+        skipped = sum(n.status == NodeStatus.SKIPPED for n in wf.nodes.values())
         return {
-            "workflow_id": workflow_id,
+            "workflow_id": wf.workflow_id,
             "name": wf.name,
-            "status": "completed" if not failed else "partial_failure",
+            "status": "partial_failure" if failed or skipped else "completed",
             "node_count": len(wf.nodes),
-            "completed": len(executed),
-            "failed": len(failed),
-            "results": all_results,
+            "completed": completed,
+            "failed": failed,
+            "skipped": skipped,
+            "results": results,
             "context": context,
         }
 
-    async def _execute_node(self, node: WorkflowNode, context: dict) -> Any:
+    async def _execute_node(self, node: WorkflowNode, context: dict[str, Any]) -> Any:
         """Execute a single node based on its type."""
         node.status = NodeStatus.RUNNING
 
@@ -209,26 +289,31 @@ class WorkflowEngine:
         elif node.node_type == NodeType.SUB_WORKFLOW:
             if not node.sub_workflow:
                 raise ValueError("Sub-workflow node has no sub-workflow")
-            return await self.execute_workflow(node.sub_workflow.workflow_id, context)
+            result = await self.execute_workflow(node.sub_workflow.workflow_id, context)
+            if result.get("error") or result.get("status") != "completed":
+                raise RuntimeError(f"Sub-workflow failed: {result}")
+            return result
 
         else:
             raise ValueError(f"Unknown node type: {node.node_type}")
 
-    def to_json(self, workflow_id: str) -> dict:
+    def to_json(self, workflow_id: str) -> dict[str, Any]:
         """Serialize a workflow definition to JSON for inspection."""
         wf = self.workflows.get(workflow_id)
         if not wf:
             return {"error": "Workflow not found"}
         nodes = []
         for nid, node in wf.nodes.items():
-            nodes.append({
-                "node_id": nid,
-                "type": node.node_type.value,
-                "tool_name": node.tool_name,
-                "has_condition": node.condition is not None,
-                "dependencies": node.dependencies,
-                "status": node.status.value,
-            })
+            nodes.append(
+                {
+                    "node_id": nid,
+                    "type": node.node_type.value,
+                    "tool_name": node.tool_name,
+                    "has_condition": node.condition is not None,
+                    "dependencies": node.dependencies,
+                    "status": node.status.value,
+                }
+            )
         return {
             "workflow_id": wf.workflow_id,
             "name": wf.name,
@@ -238,7 +323,7 @@ class WorkflowEngine:
             "nodes": nodes,
         }
 
-    def get_tool_definitions(self) -> List[Dict[str, Any]]:
+    def get_tool_definitions(self) -> list[dict[str, Any]]:
         return [
             {
                 "name": "workflow_create",
@@ -261,7 +346,11 @@ class WorkflowEngine:
                         "workflow_id": {"type": "string"},
                         "tool_name": {"type": "string"},
                         "arguments": {"type": "object", "default": {}},
-                        "dependencies": {"type": "array", "items": {"type": "string"}, "default": []},
+                        "dependencies": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "default": [],
+                        },
                     },
                     "required": ["workflow_id", "tool_name"],
                 },

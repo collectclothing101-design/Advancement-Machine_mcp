@@ -63,6 +63,12 @@ Composable task handlers with resilience patterns — transforms monolithic clie
 
 ---
 
+## Recursive adaptation
+
+Workflow execution can feed runtime metrics into the recursive improvement engine.
+See [workflow feedback and recursive adaptation](docs/recursive-adaptation.md) for
+configuration, candidate validation, and deployment behavior.
+
 ## CLI Reference
 
 ### Temporal Commands
