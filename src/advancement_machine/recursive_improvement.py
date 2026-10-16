@@ -1,26 +1,30 @@
 """
 Recursive Self-Improvement Engine.
 
-Monitors its own execution metrics, identifies bottlenecks, generates
-improvement patches, tests them in sandboxed isolation, and deploys
-successful mutations to the live system. The engine improves itself.
-
-This is the holy grail of autonomous software evolution.
+Tracks runtime regressions and proposes deterministic source simplifications.
+Callers supply behavioral validation and scoring, then explicitly deploy passed
+candidates. Evaluation runs in the caller's process; deployment updates disk
+and does not hot-reload already imported code.
 """
+
 import ast
 import copy
 import hashlib
 import inspect
 import logging
-import random
-import time
-import traceback
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+import math
+import os
+import stat
+import tempfile
+import textwrap
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
+
 
 @dataclass
 class ImprovementCandidate:
@@ -29,18 +33,22 @@ class ImprovementCandidate:
     original_source: str
     mutated_source: str
     score_before: float
-    score_after: Optional[float] = None
+    score_after: float | None = None
     status: str = "pending"  # pending, testing, passed, failed, deployed
+    source_hash: str = ""
+    target_line: int = 0
+    validated_hash: str = ""
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
 
 class RecursiveImprovementEngine:
     """Analyzes its own runtime, generates mutations, validates them,
     and deploys successful improvements back into the running system."""
 
-    def __init__(self, watch_dirs: List[str] = None):
+    def __init__(self, watch_dirs: list[str] | None = None) -> None:
         self.watch_dirs = watch_dirs or ["src/advancement_machine"]
-        self.candidates: Dict[str, ImprovementCandidate] = {}
-        self.metrics: Dict[str, List[float]] = {
+        self.candidates: dict[str, ImprovementCandidate] = {}
+        self.metrics: dict[str, list[float]] = {
             "execution_time": [],
             "memory_usage": [],
             "error_rate": [],
@@ -49,34 +57,38 @@ class RecursiveImprovementEngine:
         self._generation_count = 0
         self._deployment_count = 0
 
-    def record_metric(self, metric_name: str, value: float):
-        """Record a runtime metric for analysis."""
-        if metric_name in self.metrics:
-            self.metrics[metric_name].append(value)
-            # Keep only last 1000 data points
-            if len(self.metrics[metric_name]) > 1000:
-                self.metrics[metric_name] = self.metrics[metric_name][-1000:]
+    def record_metric(self, metric_name: str, value: float) -> None:
+        """Keep bounded, finite, nonnegative runtime samples."""
+        if metric_name not in self.metrics:
+            return
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("Metrics must be finite and nonnegative")
+        self.metrics[metric_name].append(value)
+        self.metrics[metric_name] = self.metrics[metric_name][-1000:]
 
-    def analyze_bottlenecks(self) -> List[Dict[str, Any]]:
-        """Identify top bottlenecks from metric trends."""
+    def analyze_bottlenecks(self) -> list[dict[str, Any]]:
+        """Compare adjacent ten-sample windows with metric-specific direction."""
         bottlenecks = []
         for name, values in self.metrics.items():
-            if len(values) < 10:
+            if len(values) < 20:
                 continue
-            recent = values[-10:]
-            avg_recent = sum(recent) / len(recent)
-            older = values[:-10]
-            avg_older = sum(older) / len(older) if older else avg_recent
-            if avg_recent > avg_older * 1.2:
-                bottlenecks.append({
-                    "metric": name,
-                    "degradation": round((avg_recent / avg_older - 1) * 100, 1),
-                    "recent_avg": round(avg_recent, 4),
-                    "older_avg": round(avg_older, 4),
-                })
+            avg_recent = sum(values[-10:]) / 10
+            avg_older = sum(values[-20:-10]) / 10
+            change = avg_older - avg_recent if name == "throughput" else avg_recent - avg_older
+            # A zero baseline is a new regression, with a bounded denominator.
+            degradation = change / max(avg_older, 1e-12)
+            if degradation > 0.2:
+                bottlenecks.append(
+                    {
+                        "metric": name,
+                        "degradation": round(degradation * 100, 1),
+                        "recent_avg": round(avg_recent, 4),
+                        "older_avg": round(avg_older, 4),
+                    }
+                )
         return sorted(bottlenecks, key=lambda x: x["degradation"], reverse=True)
 
-    def scan_for_mutation_targets(self) -> List[Dict[str, Any]]:
+    def scan_for_mutation_targets(self) -> list[dict[str, Any]]:
         """Scan source files for functions that could be optimized."""
         targets = []
         for watch_dir in self.watch_dirs:
@@ -88,222 +100,220 @@ class RecursiveImprovementEngine:
                     content = py_file.read_text()
                     tree = ast.parse(content)
                     for node in ast.walk(tree):
-                        if isinstance(node, ast.FunctionDef):
+                        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                             # Measure complexity
-                            num_lines = node.end_lineno - node.lineno if hasattr(node, 'end_lineno') else 0
-                            num_loops = sum(1 for n in ast.walk(node) if isinstance(n, (ast.For, ast.While, ast.comprehension)))
+                            num_lines = (node.end_lineno or node.lineno) - node.lineno
+                            num_loops = sum(
+                                1
+                                for n in ast.walk(node)
+                                if isinstance(n, (ast.For, ast.While, ast.comprehension))
+                            )
                             num_calls = sum(1 for n in ast.walk(node) if isinstance(n, ast.Call))
-                            complexity_score = num_lines + num_loops * 3 + num_calls * 0.5
-                            targets.append({
-                                "file": str(py_file),
-                                "function": node.name,
-                                "line": node.lineno,
-                                "lines": num_lines,
-                                "loops": num_loops,
-                                "calls": num_calls,
-                                "complexity": complexity_score,
-                            })
-                except SyntaxError:
+                            complexity_score = self._score_function(node)
+                            targets.append(
+                                {
+                                    "file": str(py_file),
+                                    "function": node.name,
+                                    "line": node.lineno,
+                                    "lines": num_lines,
+                                    "loops": num_loops,
+                                    "calls": num_calls,
+                                    "complexity": complexity_score,
+                                }
+                            )
+                except (SyntaxError, OSError, UnicodeError):
                     continue
-        return sorted(targets, key=lambda x: x["complexity"], reverse=True)[:20]
+        return sorted(targets, key=lambda x: (x["complexity"], x["file"], x["line"]), reverse=True)[
+            :20
+        ]
 
-    def mutate_function(self, file_path: str, function_name: str) -> Optional[ImprovementCandidate]:
-        """Generate a mutated version of a function by applying random
-        code transformations: loop unrolling, list comprehension replacement,
-        early exit insertion, guard clause inversion."""
+    @staticmethod
+    def _source_hash(source: str) -> str:
+        return hashlib.sha256(source.encode()).hexdigest()
+
+    @staticmethod
+    def _find_function(tree: ast.AST, name: str) -> Any | None:
+        matches = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
+        ]
+        # Bare names must identify exactly one function, including methods.
+        return matches[0] if len(matches) == 1 else None
+
+    def mutate_function(self, file_path: str, function_name: str) -> ImprovementCandidate | None:
+        """Generate a deterministic reduction of nesting; reject no-op candidates."""
         path = Path(file_path)
-        if not path.exists():
-            return None
-
-        source = path.read_text()
         try:
+            source = path.read_text()
             tree = ast.parse(source)
-        except SyntaxError:
+        except (OSError, UnicodeError, SyntaxError):
             return None
-
-        # Find the target function
-        target_node = None
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == function_name:
-                target_node = node
-                break
-
-        if target_node is None:
+        target = self._find_function(tree, function_name)
+        if target is None:
             return None
-
-        original_snippet = ast.unparse(target_node)
-        mutated = self._apply_random_mutation(target_node)
-
+        mutated = self._apply_random_mutation(target)
         if mutated is None:
             return None
-
-        candidate_id = hashlib.md5(f"{file_path}:{function_name}:{time.time()}".encode()).hexdigest()[:12]
+        mutated_source = ast.unparse(mutated)
+        candidate_id = self._source_hash(f"{path.resolve()}:{source}:{mutated_source}")[:12]
+        if candidate_id in self.candidates:
+            return self.candidates[candidate_id]
         candidate = ImprovementCandidate(
             id=candidate_id,
-            target_function=f"{file_path}:{function_name}",
-            original_source=original_snippet,
-            mutated_source=ast.unparse(mutated),
-            score_before=self._score_function(target_node),
+            target_function=f"{path.resolve()}:{function_name}",
+            original_source=ast.unparse(target),
+            mutated_source=mutated_source,
+            score_before=self._score_function(target),
+            source_hash=self._source_hash(source),
+            target_line=target.lineno,
         )
+        # Validate the complete module, including indentation and async context.
+        try:
+            compile(self._replace_function(source, target, mutated_source), str(path), "exec")
+        except (SyntaxError, ValueError):
+            return None
         self.candidates[candidate_id] = candidate
         self._generation_count += 1
         return candidate
 
-    def _apply_random_mutation(self, node: ast.FunctionDef) -> Optional[ast.FunctionDef]:
-        """Apply one of several mutation strategies."""
-        strategies = [
-            self._mutate_list_comprehension,
-            self._mutate_add_guard_clause,
-            self._mutate_invert_condition,
-        ]
-        strategy = random.choice(strategies)
-        try:
-            return strategy(copy.deepcopy(node))
-        except Exception:
+    def _apply_random_mutation(self, node: Any) -> Any | None:
+        """Compatibility entry point for deterministic, semantics-preserving rewrites."""
+        mutated = self._mutate_add_guard_clause(copy.deepcopy(node))
+        ast.fix_missing_locations(mutated)
+        if ast.dump(node, include_attributes=False) == ast.dump(mutated, include_attributes=False):
             return None
+        return mutated
 
     @staticmethod
-    def _mutate_list_comprehension(node: ast.FunctionDef) -> ast.FunctionDef:
-        """Convert simple for-appends to list comprehensions."""
-        for child in ast.walk(node):
-            if isinstance(child, ast.For):
-                body = child.body
-                if len(body) == 1 and isinstance(body[0], ast.Expr):
-                    inner = body[0].value
-                    if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute):
-                        if inner.func.attr == 'append' and inner.args:
-                            # Transform to list comprehension
-                            new_comp = ast.ListComp(
-                                elt=inner.args[0],
-                                generators=[ast.comprehension(
-                                    target=child.target,
-                                    iter=child.iter,
-                                    ifs=[],
-                                    is_async=0,
-                                )]
-                            )
-                            assign = ast.Assign(
-                                targets=[ast.Name(id=child.target.id, ctx=ast.Store())],
-                                value=new_comp,
-                            )
-                            child.body = [ast.Expr(value=assign)]
+    def _mutate_add_guard_clause(node: Any) -> Any:
+        """Flatten an else branch when the if body always returns or raises.
+
+        No expressions are reordered or evaluated again, and no new names are
+        introduced. Nested function and class scopes are left alone.
+        """
+
+        class GuardTransformer(ast.NodeTransformer):
+            def visit_FunctionDef(self, child: Any) -> Any:
+                return child
+
+            def visit_AsyncFunctionDef(self, child: ast.AsyncFunctionDef) -> Any:
+                return child
+
+            def visit_ClassDef(self, child: ast.ClassDef) -> Any:
+                return child
+
+            def visit_If(self, child: ast.If) -> Any:
+                self.generic_visit(child)
+                if child.orelse and isinstance(child.body[-1], (ast.Return, ast.Raise)):
+                    tail = child.orelse
+                    child.orelse = []
+                    return [child, *tail]
+                return child
+
+        transformer = GuardTransformer()
+        node.body = [
+            result for child in node.body for result in _as_statements(transformer.visit(child))
+        ]
         return node
 
-    @staticmethod
-    def _mutate_add_guard_clause(node: ast.FunctionDef) -> ast.FunctionDef:
-        """Add early return guards at the start of deeply nested functions."""
-        body = node.body
-        if not body:
-            return node
-        # Only apply to functions with more than 10 lines of body
-        last_line = node.end_lineno if hasattr(node, 'end_lineno') else node.lineno + 10
-        if last_line - node.lineno < 10:
-            return node
-        # Insert a guard: if not condition: return early
-        guard = ast.If(
-            test=ast.UnaryOp(op=ast.Not(), operand=ast.Name(id='self', ctx=ast.Load())),
-            body=[ast.Return(value=None)],
-            orelse=[],
-        )
-        node.body.insert(0, guard)
-        return node
+    def _score_function(self, node: Any) -> float:
+        """Structural complexity independent of stale AST source line numbers."""
 
-    @staticmethod
-    def _mutate_invert_condition(node: ast.FunctionDef) -> ast.FunctionDef:
-        """Invert an if-else block to reduce nesting."""
-        for child in ast.walk(node):
-            if isinstance(child, ast.If):
-                if child.orelse:
-                    # Swap body and orelse, invert condition
-                    old_test = child.test
-                    if isinstance(old_test, ast.UnaryOp) and isinstance(old_test.op, ast.Not):
-                        child.test = old_test.operand
-                    else:
-                        child.test = ast.UnaryOp(op=ast.Not(), operand=old_test)
-                    child.body, child.orelse = child.orelse, child.body
-        return node
+        def score(child: ast.AST, depth: int = 0) -> float:
+            control = isinstance(child, (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try))
+            return float(control) * (1 + depth) + sum(
+                score(n, depth + int(control)) for n in ast.iter_child_nodes(child)
+            )
 
-    def _score_function(self, node: ast.FunctionDef) -> float:
-        """Compute a complexity score for a function (lower is better)."""
-        num_lines = node.end_lineno - node.lineno if hasattr(node, 'end_lineno') else 0
-        num_loops = sum(1 for n in ast.walk(node) if isinstance(n, (ast.For, ast.While)))
-        num_nested = sum(1 for n in ast.walk(node) if isinstance(n, (ast.If, ast.Try)))
-        return num_lines + num_loops * 5 + num_nested * 2
+        return score(node)
 
-    async def test_candidate(self, candidate_id: str, test_function: Callable[[str], float]) -> bool:
-        """Test a candidate by executing its mutated source against a test function.
+    async def test_candidate(
+        self, candidate_id: str, test_function: Callable[[str], float | Awaitable[float]]
+    ) -> bool:
+        """Evaluate original and mutation with the same lower-is-better objective.
 
-        The test_function receives the mutated source and returns a score.
-        Returns True if the candidate passes (score_after > score_before).
+        The caller must check behavior and raise on invalid results. Callbacks
+        may be synchronous or async; this method does not provide isolation.
         """
         candidate = self.candidates.get(candidate_id)
-        if not candidate:
+        if not candidate or candidate.status != "pending":
             return False
-
+        candidate.status = "testing"
+        original, mutated = candidate.original_source, candidate.mutated_source
         try:
-            candidate.status = "testing"
-            score = test_function(candidate.mutated_source)
-            candidate.score_after = score
-            if score > candidate.score_before:
+            compile(mutated, "<candidate>", "exec")
+            scores = []
+            for source in (original, mutated):
+                result = test_function(source)
+                if inspect.isawaitable(result):
+                    result = await result
+                if not math.isfinite(result) or result < 0:
+                    raise ValueError("Evaluation scores must be finite and nonnegative")
+                scores.append(float(result))
+            candidate.score_before, candidate.score_after = scores
+            if scores[1] < scores[0] and candidate.mutated_source == mutated:
+                candidate.validated_hash = self._source_hash(mutated)
                 candidate.status = "passed"
                 return True
-            else:
+        except Exception as exc:
+            logger.warning("Candidate %s failed evaluation: %s", candidate_id, exc)
+        finally:
+            if candidate.status == "testing":
                 candidate.status = "failed"
-                return False
-        except Exception as e:
-            candidate.status = "failed"
-            logger.error(f"Candidate {candidate_id} failed test: {e}")
-            return False
+        return False
+
+    @staticmethod
+    def _replace_function(source: str, target: Any, replacement: str) -> str:
+        lines = source.splitlines(keepends=True)
+        start = min([target.lineno] + [d.lineno for d in target.decorator_list]) - 1
+        indent = lines[start][: target.col_offset]
+        # Refuse inline definitions; replacing them could remove sibling code.
+        if indent.strip():
+            raise ValueError("Inline definitions cannot be replaced")
+        return (
+            "".join(lines[:start])
+            + textwrap.indent(replacement, indent)
+            + "\n"
+            + "".join(lines[target.end_lineno :])
+        )
 
     def deploy_candidate(self, candidate_id: str) -> bool:
-        """Deploy a passed candidate by writing its mutated source to the original file."""
+        """Atomically replace only a validated function in an unchanged source file."""
         candidate = self.candidates.get(candidate_id)
         if not candidate or candidate.status != "passed":
             return False
-
-        # Parse the file to find and replace the function
-        file_path, func_name = candidate.target_function.split(":", 1)
+        if candidate.validated_hash != self._source_hash(candidate.mutated_source):
+            return False
+        file_path, func_name = candidate.target_function.rsplit(":", 1)
         path = Path(file_path)
-        if not path.exists():
-            return False
-
-        source = path.read_text()
+        temporary = None
         try:
-            tree = ast.parse(source)
-        except SyntaxError:
+            source = path.read_text()
+            if self._source_hash(source) != candidate.source_hash:
+                return False
+            target = self._find_function(ast.parse(source), func_name)
+            if target is None or target.lineno != candidate.target_line:
+                return False
+            new_source = self._replace_function(source, target, candidate.mutated_source)
+            compile(new_source, str(path), "exec")
+            with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(new_source)
+            temporary.chmod(stat.S_IMODE(path.stat().st_mode))
+            if self._source_hash(path.read_text()) != candidate.source_hash:
+                return False
+            os.replace(temporary, path)
+        except (OSError, UnicodeError, SyntaxError, ValueError):
             return False
-
-        # Reconstruct the file with the mutated function
-        # This is a simplified approach — production would use more sophisticated AST manipulation
-        lines = source.splitlines()
-        new_lines = []
-        skip_mode = False
-        skip_count = 0
-
-        for line in lines:
-            if f"def {func_name}(" in line:
-                skip_mode = True
-                # Insert mutated source
-                new_lines.append(candidate.mutated_source)
-                skip_count = 1  # Skip the original
-            elif skip_mode and skip_count > 0:
-                # Simple heuristic: skip until we're back to original indent level
-                if line and not line.startswith((" ", "\t")):
-                    skip_mode = False
-                    new_lines.append(line)
-                else:
-                    skip_count += 1
-            else:
-                new_lines.append(line)
-
-        new_source = "\n".join(new_lines)
-        path.write_text(new_source)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
         candidate.status = "deployed"
         self._deployment_count += 1
-        logger.info(f"Deployed improvement {candidate_id} to {file_path}")
         return True
 
-    def summary(self) -> dict:
+    def summary(self) -> dict[str, Any]:
         return {
             "candidates_generated": self._generation_count,
             "candidates_deployed": self._deployment_count,
@@ -312,7 +322,7 @@ class RecursiveImprovementEngine:
             "metrics_tracked": list(self.metrics.keys()),
         }
 
-    def get_tool_definitions(self) -> List[Dict[str, Any]]:
+    def get_tool_definitions(self) -> list[dict[str, Any]]:
         return [
             {
                 "name": "recursive_improve_analyze",
@@ -337,3 +347,7 @@ class RecursiveImprovementEngine:
                 "inputSchema": {"type": "object", "properties": {}},
             },
         ]
+
+
+def _as_statements(result: Any) -> list[Any]:
+    return result if isinstance(result, list) else [result]
