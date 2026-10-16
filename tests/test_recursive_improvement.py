@@ -25,12 +25,14 @@ def neighbor():
 
 @pytest.fixture
 def target(tmp_path):
+    """Write the shared sample module to a temporary file and return its path."""
     path = tmp_path / "target.py"
     path.write_text(SOURCE)
     return path
 
 
 def evaluate(source):
+    """Execute `source`, assert `choose` preserves its behavior, and return its complexity score."""
     namespace = {}
     exec(source, namespace)
     assert [namespace["choose"](v) for v in (-2, 0, 3)] == [2, 10, 4]
@@ -39,6 +41,7 @@ def evaluate(source):
 
 @pytest.mark.asyncio
 async def test_generate_evaluate_deploy_and_repeat(target):
+    """A mutation that passes evaluation deploys, and a repeat cycle yields no further no-op."""
     engine = RecursiveImprovementEngine()
     candidate = engine.mutate_function(str(target), "choose")
     assert candidate is not None
@@ -60,6 +63,7 @@ async def test_generate_evaluate_deploy_and_repeat(target):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["source_changed", "candidate_changed"])
 async def test_deployment_refuses_stale_or_unvalidated_content(target, mode):
+    """Deployment refuses when the on-disk source or the candidate content has changed since validation."""
     engine = RecursiveImprovementEngine()
     candidate = engine.mutate_function(str(target), "choose")
     assert await engine.test_candidate(candidate.id, evaluate)
@@ -75,6 +79,7 @@ async def test_deployment_refuses_stale_or_unvalidated_content(target, mode):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("score", [float("nan"), float("inf"), -1, 10])
 async def test_invalid_or_equal_scores_fail(target, score):
+    """Non-finite, negative, or non-improving evaluation scores mark the candidate failed."""
     engine = RecursiveImprovementEngine()
     candidate = engine.mutate_function(str(target), "choose")
     assert not await engine.test_candidate(candidate.id, lambda _: score)
@@ -84,10 +89,12 @@ async def test_invalid_or_equal_scores_fail(target, score):
 
 @pytest.mark.asyncio
 async def test_async_evaluator_and_concurrent_evaluation(target):
+    """Only one of two concurrent evaluations of the same candidate can succeed."""
     engine = RecursiveImprovementEngine()
     candidate = engine.mutate_function(str(target), "choose")
 
     async def evaluator(source):
+        """Yield control once, then delegate to the synchronous evaluator."""
         await asyncio.sleep(0)
         return evaluate(source)
 
@@ -99,10 +106,12 @@ async def test_async_evaluator_and_concurrent_evaluation(target):
 
 @pytest.mark.asyncio
 async def test_cancelled_evaluation_cannot_deploy(target):
+    """A cancelled evaluator propagates the cancellation and leaves the candidate failed."""
     engine = RecursiveImprovementEngine()
     candidate = engine.mutate_function(str(target), "choose")
 
     async def evaluator(_):
+        """Simulate cancellation during evaluation."""
         raise asyncio.CancelledError
 
     with pytest.raises(asyncio.CancelledError):
@@ -113,6 +122,7 @@ async def test_cancelled_evaluation_cannot_deploy(target):
 
 @pytest.mark.asyncio
 async def test_decorated_async_method_preserves_class_neighbors(tmp_path):
+    """Mutating a decorated async method keeps its decorator and sibling methods intact."""
     path = tmp_path / "methods.py"
     path.write_text("""class Example:
     @staticmethod
@@ -137,6 +147,7 @@ async def test_decorated_async_method_preserves_class_neighbors(tmp_path):
 
 
 def test_ambiguous_targets_and_unsafe_loop_are_ignored(tmp_path):
+    """Mutation is skipped when the target name is ambiguous or no guard-clause rewrite applies."""
     path = tmp_path / "ambiguous.py"
     path.write_text(
         SOURCE + "\nclass Other:\n" + "\n".join("    " + line for line in SOURCE.splitlines())
@@ -150,6 +161,7 @@ def test_ambiguous_targets_and_unsafe_loop_are_ignored(tmp_path):
 
 
 def test_metric_direction_zero_baseline_and_bounded_history():
+    """Bottleneck detection accounts for metric direction and zero baselines, and history is capped."""
     engine = RecursiveImprovementEngine()
     for name, old, new in [("throughput", 10, 5), ("error_rate", 0, 0.5), ("execution_time", 1, 2)]:
         for value in [old] * 10 + [new] * 10:
@@ -169,6 +181,7 @@ def test_metric_direction_zero_baseline_and_bounded_history():
 
 
 def test_generation_rejects_reindentation_that_changes_multiline_docstring(tmp_path):
+    """Generation refuses a mutation whose re-indentation would alter a multiline docstring."""
     path = tmp_path / "multiline.py"
     path.write_text('''class Example:
     def choose(self, value):
@@ -189,6 +202,7 @@ def test_generation_rejects_reindentation_that_changes_multiline_docstring(tmp_p
 
 @pytest.mark.asyncio
 async def test_deployment_rejects_reindentation_that_changes_multiline_literal(tmp_path):
+    """Deployment refuses a validated candidate whose re-indentation would alter a multiline string literal."""
     path = tmp_path / "multiline.py"
     path.write_text("""class Example:
     def choose(self, value):
@@ -216,6 +230,7 @@ second"""
 @pytest.mark.parametrize("encoding", ["latin-1", "utf-8-sig"])
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 async def test_source_encoding_survives_scan_mutation_and_deployment(tmp_path, encoding, newline):
+    """Non-UTF-8 encodings and non-default line endings survive scanning, mutation, and deployment."""
     path = tmp_path / "encoded.py"
     source = f"# coding: {encoding}\n# caf\u00e9\n" + SOURCE.replace(
         'return "untouched"', 'return "caf\u00e9"'

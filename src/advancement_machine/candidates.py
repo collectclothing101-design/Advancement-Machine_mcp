@@ -5,6 +5,7 @@ class CandidateGenerator:
     """Generates subdomain candidates from wordlists and patterns."""
 
     def __init__(self, domain: str):
+        """Store the base domain, stripped of any trailing dot."""
         self.domain = domain.rstrip('.')
 
     def from_wordlist(self, words: List[str]) -> List[str]:
