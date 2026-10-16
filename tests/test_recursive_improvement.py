@@ -166,3 +166,77 @@ def test_metric_direction_zero_baseline_and_bounded_history():
     for value in (float("nan"), float("inf"), -1):
         with pytest.raises(ValueError):
             engine.record_metric("error_rate", value)
+
+
+def test_generation_rejects_reindentation_that_changes_multiline_docstring(tmp_path):
+    path = tmp_path / "multiline.py"
+    path.write_text('''class Example:
+    def choose(self, value):
+        """First line.
+        Second line.
+        """
+        if value:
+            return 1
+        else:
+            return 2
+''')
+    original = path.read_bytes()
+    engine = RecursiveImprovementEngine()
+    assert engine.mutate_function(str(path), "choose") is None
+    assert path.read_bytes() == original
+    assert not engine.candidates
+
+
+@pytest.mark.asyncio
+async def test_deployment_rejects_reindentation_that_changes_multiline_literal(tmp_path):
+    path = tmp_path / "multiline.py"
+    path.write_text("""class Example:
+    def choose(self, value):
+        if value:
+            return 1
+        else:
+            return 2
+""")
+    engine = RecursiveImprovementEngine()
+    candidate = engine.mutate_function(str(path), "choose")
+    candidate.mutated_source = '''def choose(self, value):
+    if value:
+        return """first
+second"""
+    return 2'''
+    scores = iter([2, 1])
+    assert await engine.test_candidate(candidate.id, lambda _: next(scores))
+    original = path.read_bytes()
+    assert not engine.deploy_candidate(candidate.id)
+    assert path.read_bytes() == original
+    assert candidate.status == "passed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encoding", ["latin-1", "utf-8-sig"])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+async def test_source_encoding_survives_scan_mutation_and_deployment(tmp_path, encoding, newline):
+    path = tmp_path / "encoded.py"
+    source = f"# coding: {encoding}\n# caf\u00e9\n" + SOURCE.replace(
+        'return "untouched"', 'return "caf\u00e9"'
+    )
+    source = source.replace("\n", newline)
+    original = source.encode(encoding)
+    path.write_bytes(original)
+    engine = RecursiveImprovementEngine(watch_dirs=[str(tmp_path)])
+    targets = engine.scan_for_mutation_targets()
+    assert any(target["function"] == "choose" for target in targets)
+    candidate = engine.mutate_function(str(path), "choose")
+    assert candidate is not None
+    assert await engine.test_candidate(candidate.id, evaluate)
+    assert engine.deploy_candidate(candidate.id)
+    deployed = path.read_bytes()
+    assert deployed.startswith(original.splitlines(keepends=True)[0])
+    assert f"# caf\u00e9{newline}".encode(encoding).removeprefix(b"\xef\xbb\xbf") in deployed
+    assert deployed.count(b"\n") == deployed.count(newline.encode("ascii"))
+    neighbor = source[source.index("def neighbor") :].encode(encoding).removeprefix(b"\xef\xbb\xbf")
+    assert deployed.endswith(neighbor)
+    namespace = {}
+    exec(compile(deployed, str(path), "exec"), namespace)
+    assert namespace["neighbor"]() == "caf\u00e9"
+    assert namespace["choose"](0) == 10

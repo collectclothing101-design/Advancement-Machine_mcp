@@ -17,11 +17,13 @@ import os
 import stat
 import tempfile
 import textwrap
+import tokenize
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from io import TextIOWrapper
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +99,7 @@ class RecursiveImprovementEngine:
                 if py_file.name == "__init__.py":
                     continue
                 try:
-                    content = py_file.read_text()
+                    content, _ = self._read_source(py_file)
                     tree = ast.parse(content)
                     for node in ast.walk(tree):
                         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -128,6 +130,13 @@ class RecursiveImprovementEngine:
         ]
 
     @staticmethod
+    def _read_source(path: Path) -> tuple[str, str]:
+        """Read Python source using its encoding cookie or UTF-8 BOM."""
+        with cast(TextIOWrapper, tokenize.open(path)) as stream:
+            stream.reconfigure(newline="")
+            return stream.read(), stream.encoding
+
+    @staticmethod
     def _source_hash(source: str) -> str:
         return hashlib.sha256(source.encode()).hexdigest()
 
@@ -145,7 +154,7 @@ class RecursiveImprovementEngine:
         """Generate a deterministic reduction of nesting; reject no-op candidates."""
         path = Path(file_path)
         try:
-            source = path.read_text()
+            source, _ = self._read_source(path)
             tree = ast.parse(source)
         except (OSError, UnicodeError, SyntaxError):
             return None
@@ -170,7 +179,7 @@ class RecursiveImprovementEngine:
         )
         # Validate the complete module, including indentation and async context.
         try:
-            compile(self._replace_function(source, target, mutated_source), str(path), "exec")
+            self._validated_replacement(source, target, mutated_source, path)
         except (SyntaxError, ValueError):
             return None
         self.candidates[candidate_id] = candidate
@@ -271,15 +280,39 @@ class RecursiveImprovementEngine:
         # Refuse inline definitions; replacing them could remove sibling code.
         if indent.strip():
             raise ValueError("Inline definitions cannot be replaced")
+        newline = "\r\n" if lines[start].endswith("\r\n") else "\n"
+        replacement = replacement.replace("\r\n", "\n")
         return (
             "".join(lines[:start])
-            + textwrap.indent(replacement, indent)
-            + "\n"
+            + textwrap.indent(replacement, indent).replace("\n", newline)
+            + newline
             + "".join(lines[target.end_lineno :])
         )
 
+    def _validated_replacement(self, source: str, target: Any, replacement: str, path: Path) -> str:
+        """Reject changes to the candidate AST introduced by embedding it in a module."""
+        new_source = self._replace_function(source, target, replacement)
+        expected_tree = ast.parse(replacement)
+        if len(expected_tree.body) != 1 or not isinstance(
+            expected_tree.body[0], (ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            raise ValueError("Replacement must contain exactly one function")
+        embedded_tree = ast.parse(new_source)
+        embedded = self._find_function(embedded_tree, target.name)
+        if embedded is None or ast.dump(embedded, include_attributes=False) != ast.dump(
+            expected_tree.body[0], include_attributes=False
+        ):
+            raise ValueError("Embedding the replacement changed its function AST")
+        compile(embedded_tree, str(path), "exec")
+        return new_source
+
     def deploy_candidate(self, candidate_id: str) -> bool:
-        """Atomically replace only a validated function in an unchanged source file."""
+        """Replace a validated function; callers must hold exclusive write access.
+
+        Atomic replacement prevents partial writes, but there is no advisory lock
+        shared with external writers. Exclusive access must span this entire call,
+        including the final source-hash check and replacement.
+        """
         candidate = self.candidates.get(candidate_id)
         if not candidate or candidate.status != "passed":
             return False
@@ -289,19 +322,20 @@ class RecursiveImprovementEngine:
         path = Path(file_path)
         temporary = None
         try:
-            source = path.read_text()
+            source, encoding = self._read_source(path)
             if self._source_hash(source) != candidate.source_hash:
                 return False
             target = self._find_function(ast.parse(source), func_name)
             if target is None or target.lineno != candidate.target_line:
                 return False
-            new_source = self._replace_function(source, target, candidate.mutated_source)
-            compile(new_source, str(path), "exec")
-            with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as stream:
+            new_source = self._validated_replacement(source, target, candidate.mutated_source, path)
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding=encoding, newline="", dir=path.parent, delete=False
+            ) as stream:
                 temporary = Path(stream.name)
                 stream.write(new_source)
             temporary.chmod(stat.S_IMODE(path.stat().st_mode))
-            if self._source_hash(path.read_text()) != candidate.source_hash:
+            if self._source_hash(self._read_source(path)[0]) != candidate.source_hash:
                 return False
             os.replace(temporary, path)
         except (OSError, UnicodeError, SyntaxError, ValueError):

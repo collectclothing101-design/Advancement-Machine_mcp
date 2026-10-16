@@ -37,7 +37,10 @@ propagate to their parent.
 3. Call `deploy_candidate(candidate.id)` explicitly after validation. It checks
    the source fingerprint and validated candidate, compiles the complete module,
    preserves neighboring definitions and file permissions, and replaces the file
-   atomically. A changed source file requires generating a fresh candidate.
+   atomically. Reads and writes honor the file's Python encoding cookie and UTF-8
+   BOM, and preserve LF or CRLF line endings. The embedded function's AST must match the evaluated candidate, including
+   multiline string values; a mismatch rejects generation or deployment.
+   A changed source file requires generating a fresh candidate.
 4. Repeat against the updated source to find further simplifications. Candidate
    IDs are content based; repeated generation returns the existing candidate.
    Unchanged functions produce no candidate.
@@ -52,3 +55,13 @@ evaluator with meaningful behavioral checks and a consistent objective such as
 complexity, latency, or memory usage. Deployment writes source on disk; already
 imported modules require reloading or restarting through the application's normal
 lifecycle. The metric loop does not automatically execute or deploy generated code.
+
+## Exclusive write access during deployment
+
+Callers must hold exclusive write access to the target file for the entire
+`deploy_candidate` call. Coordinate deployment processes and pause editor,
+formatter, and other writes through the same external mechanism. This API has no
+shared advisory lock with those writers. The final source-hash check detects
+prior changes, and atomic replacement prevents partial writes, but neither stops
+another writer from editing between that check and replacement. Do not deploy
+while exclusive access cannot be guaranteed.
