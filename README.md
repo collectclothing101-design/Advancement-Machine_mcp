@@ -311,6 +311,10 @@ tests/
 
 ---
 
+[![M8ven Score](https://m8ven.ai/badge/mcp/lilbonner-clo3d-mcp-xoes1n?v=de8988f54847a12d6fbfadcf236f913e)](https://m8ven.ai/mcp/lilbonner-clo3d-mcp-xoes1n?s=readme)
+
+—-- 
+
 **License**: MIT
 **Python**: 3.10+ (3.14 tested)
 **Last Verified**: 2026-06-27
