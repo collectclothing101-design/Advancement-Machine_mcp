@@ -311,7 +311,7 @@ tests/
 
 ---
 
-[![M8ven Score](https://m8ven.ai/badge/mcp/lilbonner-clo3d-mcp-xoes1n?v=de8988f54847a12d6fbfadcf236f913e)](https://m8ven.ai/mcp/lilbonner-clo3d-mcp-xoes1n?s=readme)
+[![M8ven Score](https://m8ven.ai/badge/mcp/collectclothing101-design-advancement-machine-mcp-8lvnb4)](https://m8ven.ai/mcp/collectclothing101-design-advancement-machine-mcp-8lvnb4?s=readme)
 
 —-- 
 
